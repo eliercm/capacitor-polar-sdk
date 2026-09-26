@@ -88,7 +88,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onSuccess: { dataTypes in
-                    let types = dataTypes.map { PolarDeviceDataType.allCases.firstIndex(of: $0)! }
+                    let types = dataTypes.compactMap { Self.jsCode(for: $0) }
                     call.resolve(["types": types])
                 },
                 onFailure: { error in
@@ -100,12 +100,10 @@ class PolarSdk : CAPPlugin, ObservableObject {
     @objc func requestStreamSettings(_ call: CAPPluginCall) {
         guard let identifier = call.getString("identifier"),
               let featureIndex = call.getInt("feature"),
-              featureIndex < PolarDeviceDataType.allCases.count else {
+              let feature = Self.dataType(forJsCode: featureIndex) else {
             call.reject("Missing or invalid parameters")
             return
         }
-        
-        let feature = PolarDeviceDataType.allCases[featureIndex]
         
         api.requestStreamSettings(identifier, feature: feature)
             .observe(on: MainScheduler.instance)
@@ -141,7 +139,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
                         var data = JSObject()
                         data["bpm"] = Int(sample.hr)
                         data["rrs"] = sample.rrsMs
-                        data["timestamp"] = Int64(Date().timeIntervalSince1970 * 1000)
+                        data["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
                         self.notifyListeners("hrData", data: data)
                     }
                 },
@@ -160,22 +158,28 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let settings = parseSettings(call.getObject("settings"))
+        guard let settings = parseSettings(call.getObject("settings"),
+                                          fallback: [.sampleRate: 130, .resolution: 14]) else {
+            call.reject("Invalid stream settings")
+            return
+        }
         
         if onlineStreamingDisposables[identifier] == nil {
             onlineStreamingDisposables[identifier] = [:]
         }
         
-        onlineStreamingDisposables[identifier]?[.ecg] = api.startEcgStreaming(identifier, settings: settings ?? PolarSensorSetting([.sampleRate: 130, .resolution: 14]))
+        onlineStreamingDisposables[identifier]?[.ecg] = api.startEcgStreaming(identifier, settings: settings)
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onNext: { ecgData in
-                    for sample in ecgData.samples {
-                        var data = JSObject()
-                        data["yV"] = sample.voltage
-                        data["timestamp"] = sample.timeStamp
-                        self.notifyListeners("ecgData", data: data)
-                    }
+                    // Mirror Android's `gson.toJson(PolarEcgData)` payload exactly:
+                    // {"samples":[{"timeStamp":<ns>,"voltage":<uV>}, ...]}
+                    let samples = ecgData.map { ["timeStamp": Int($0.timeStamp), "voltage": Int($0.voltage)] }
+                    guard let encoded = try? JSONSerialization.data(withJSONObject: ["samples": samples]),
+                          let json = String(data: encoded, encoding: .utf8) else { return }
+                    var data = JSObject()
+                    data["data"] = json
+                    self.notifyListeners("ecgData", data: data)
                 },
                 onError: { error in
                     call.reject("ECG stream failed: \(error)")
@@ -192,22 +196,25 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let settings = parseSettings(call.getObject("settings"))
+        guard let settings = parseSettings(call.getObject("settings"), fallback: [:]) else {
+            call.reject("Invalid stream settings")
+            return
+        }
         
         if onlineStreamingDisposables[identifier] == nil {
             onlineStreamingDisposables[identifier] = [:]
         }
         
-        onlineStreamingDisposables[identifier]?[.acc] = api.startAccStreaming(identifier, settings: settings ?? PolarSensorSetting([:]))
+        onlineStreamingDisposables[identifier]?[.acc] = api.startAccStreaming(identifier, settings: settings)
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onNext: { accData in
-                    for sample in accData.samples {
+                    for sample in accData {
                         var data = JSObject()
-                        data["x"] = sample.x
-                        data["y"] = sample.y
-                        data["z"] = sample.z
-                        data["timestamp"] = sample.timeStamp
+                        data["x"] = Int(sample.x)
+                        data["y"] = Int(sample.y)
+                        data["z"] = Int(sample.z)
+                        data["timestamp"] = Int(sample.timeStamp)
                         self.notifyListeners("accData", data: data)
                     }
                 },
@@ -226,22 +233,25 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let settings = parseSettings(call.getObject("settings"))
+        guard let settings = parseSettings(call.getObject("settings"), fallback: [:]) else {
+            call.reject("Invalid stream settings")
+            return
+        }
         
         if onlineStreamingDisposables[identifier] == nil {
             onlineStreamingDisposables[identifier] = [:]
         }
         
-        onlineStreamingDisposables[identifier]?[.gyro] = api.startGyroStreaming(identifier, settings: settings ?? PolarSensorSetting([:]))
+        onlineStreamingDisposables[identifier]?[.gyro] = api.startGyroStreaming(identifier, settings: settings)
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onNext: { gyroData in
-                    for sample in gyroData.samples {
+                    for sample in gyroData {
                         var data = JSObject()
                         data["x"] = sample.x
                         data["y"] = sample.y
                         data["z"] = sample.z
-                        data["timestamp"] = sample.timeStamp
+                        data["timestamp"] = Int(sample.timeStamp)
                         self.notifyListeners("gyroData", data: data)
                     }
                 },
@@ -260,22 +270,25 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let settings = parseSettings(call.getObject("settings"))
+        guard let settings = parseSettings(call.getObject("settings"), fallback: [:]) else {
+            call.reject("Invalid stream settings")
+            return
+        }
         
         if onlineStreamingDisposables[identifier] == nil {
             onlineStreamingDisposables[identifier] = [:]
         }
         
-        onlineStreamingDisposables[identifier]?[.magnetometer] = api.startMagnetometerStreaming(identifier, settings: settings ?? PolarSensorSetting([:]))
+        onlineStreamingDisposables[identifier]?[.magnetometer] = api.startMagnetometerStreaming(identifier, settings: settings)
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onNext: { magData in
-                    for sample in magData.samples {
+                    for sample in magData {
                         var data = JSObject()
                         data["x"] = sample.x
                         data["y"] = sample.y
                         data["z"] = sample.z
-                        data["timestamp"] = sample.timeStamp
+                        data["timestamp"] = Int(sample.timeStamp)
                         self.notifyListeners("magnetometerData", data: data)
                     }
                 },
@@ -294,23 +307,26 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let settings = parseSettings(call.getObject("settings"))
+        guard let settings = parseSettings(call.getObject("settings"), fallback: [:]) else {
+            call.reject("Invalid stream settings")
+            return
+        }
         
         if onlineStreamingDisposables[identifier] == nil {
             onlineStreamingDisposables[identifier] = [:]
         }
         
-        onlineStreamingDisposables[identifier]?[.ppg] = api.startPpgStreaming(identifier, settings: settings ?? PolarSensorSetting([:]))
+        onlineStreamingDisposables[identifier]?[.ppg] = api.startPpgStreaming(identifier, settings: settings)
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onNext: { ppgData in
                     for sample in ppgData.samples {
                         var data = JSObject()
-                        data["ppg0"] = sample.channelSamples.count > 0 ? sample.channelSamples[0] : 0
-                        data["ppg1"] = sample.channelSamples.count > 1 ? sample.channelSamples[1] : 0
-                        data["ppg2"] = sample.channelSamples.count > 2 ? sample.channelSamples[2] : 0
-                        data["ambient"] = sample.channelSamples.count > 3 ? sample.channelSamples[3] : 0
-                        data["timestamp"] = sample.timeStamp
+                        data["ppg0"] = sample.channelSamples.count > 0 ? Int(sample.channelSamples[0]) : 0
+                        data["ppg1"] = sample.channelSamples.count > 1 ? Int(sample.channelSamples[1]) : 0
+                        data["ppg2"] = sample.channelSamples.count > 2 ? Int(sample.channelSamples[2]) : 0
+                        data["ambient"] = sample.channelSamples.count > 3 ? Int(sample.channelSamples[3]) : 0
+                        data["timestamp"] = Int(sample.timeStamp)
                         self.notifyListeners("ppgData", data: data)
                     }
                 },
@@ -339,10 +355,10 @@ class PolarSdk : CAPPlugin, ObservableObject {
                 onNext: { ppiData in
                     for sample in ppiData.samples {
                         var data = JSObject()
-                        data["ppInMs"] = sample.ppInMs
+                        data["ppInMs"] = Int(sample.ppInMs)
                         data["hr"] = sample.hr
                         data["blockerBit"] = sample.blockerBit
-                        data["errorEstimate"] = sample.ppErrorEstimate
+                        data["errorEstimate"] = Int(sample.ppErrorEstimate)
                         self.notifyListeners("ppiData", data: data)
                     }
                 },
@@ -361,20 +377,23 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let settings = parseSettings(call.getObject("settings"))
+        guard let settings = parseSettings(call.getObject("settings"), fallback: [:]) else {
+            call.reject("Invalid stream settings")
+            return
+        }
         
         if onlineStreamingDisposables[identifier] == nil {
             onlineStreamingDisposables[identifier] = [:]
         }
         
-        onlineStreamingDisposables[identifier]?[.temperature] = api.startTemperatureStreaming(identifier, settings: settings ?? PolarSensorSetting([:]))
+        onlineStreamingDisposables[identifier]?[.temperature] = api.startTemperatureStreaming(identifier, settings: settings)
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onNext: { tempData in
                     for sample in tempData.samples {
                         var data = JSObject()
                         data["temperature"] = sample.temperature
-                        data["timestamp"] = sample.timeStamp
+                        data["timestamp"] = Int(sample.timeStamp)
                         self.notifyListeners("temperatureData", data: data)
                     }
                 },
@@ -393,20 +412,23 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let settings = parseSettings(call.getObject("settings"))
+        guard let settings = parseSettings(call.getObject("settings"), fallback: [:]) else {
+            call.reject("Invalid stream settings")
+            return
+        }
         
         if onlineStreamingDisposables[identifier] == nil {
             onlineStreamingDisposables[identifier] = [:]
         }
         
-        onlineStreamingDisposables[identifier]?[.pressure] = api.startPressureStreaming(identifier, settings: settings ?? PolarSensorSetting([:]))
+        onlineStreamingDisposables[identifier]?[.pressure] = api.startPressureStreaming(identifier, settings: settings)
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onNext: { pressureData in
                     for sample in pressureData.samples {
                         var data = JSObject()
                         data["pressure"] = sample.pressure
-                        data["timestamp"] = sample.timeStamp
+                        data["timestamp"] = Int(sample.timeStamp)
                         self.notifyListeners("pressureData", data: data)
                     }
                 },
@@ -422,12 +444,11 @@ class PolarSdk : CAPPlugin, ObservableObject {
     @objc func stopStreaming(_ call: CAPPluginCall) {
         guard let identifier = call.getString("identifier"),
               let featureIndex = call.getInt("feature"),
-              featureIndex < PolarDeviceDataType.allCases.count else {
+              let feature = Self.dataType(forJsCode: featureIndex) else {
             call.reject("Missing or invalid parameters")
             return
         }
         
-        let feature = PolarDeviceDataType.allCases[featureIndex]
         onlineStreamingDisposables[identifier]?[feature]??.dispose()
         call.resolve(["value": true])
     }
@@ -545,8 +566,8 @@ class PolarSdk : CAPPlugin, ObservableObject {
             .subscribe(
                 onSuccess: { data in
                     call.resolve([
-                        "interval": data.interval.rawValue,
-                        "samples": data.samples.map { Int($0.hr) }
+                        "interval": Int(data.interval),
+                        "samples": data.samples.map { Int($0) }
                     ])
                 },
                 onFailure: { error in
@@ -593,7 +614,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let config = enabled ? LedConfig.ledAnimationEnabled : LedConfig.ledAnimationDisabled
+        let config = LedConfig(sdkModeLedEnabled: enabled, ppiModeLedEnabled: enabled)
         
         api.setLedConfig(identifier, ledConfig: config)
             .observe(on: MainScheduler.instance)
@@ -690,7 +711,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
             .observe(on: MainScheduler.instance)
             .subscribe(
                 onSuccess: { dataTypes in
-                    let types = dataTypes.map { PolarDeviceDataType.allCases.firstIndex(of: $0)! }
+                    let types = dataTypes.compactMap { Self.jsCode(for: $0) }
                     call.resolve(["types": types])
                 },
                 onFailure: { error in
@@ -702,12 +723,10 @@ class PolarSdk : CAPPlugin, ObservableObject {
     @objc func requestOfflineRecordingSettings(_ call: CAPPluginCall) {
         guard let identifier = call.getString("identifier"),
               let featureIndex = call.getInt("feature"),
-              featureIndex < PolarDeviceDataType.allCases.count else {
+              let feature = Self.dataType(forJsCode: featureIndex) else {
             call.reject("Missing or invalid parameters")
             return
         }
-        
-        let feature = PolarDeviceDataType.allCases[featureIndex]
         
         api.requestOfflineRecordingSettings(identifier, feature: feature)
             .observe(on: MainScheduler.instance)
@@ -728,12 +747,11 @@ class PolarSdk : CAPPlugin, ObservableObject {
     @objc func startOfflineRecording(_ call: CAPPluginCall) {
         guard let identifier = call.getString("identifier"),
               let featureIndex = call.getInt("feature"),
-              featureIndex < PolarDeviceDataType.allCases.count else {
+              let feature = Self.dataType(forJsCode: featureIndex) else {
             call.reject("Missing or invalid parameters")
             return
         }
         
-        let feature = PolarDeviceDataType.allCases[featureIndex]
         let settings = parseSettings(call.getObject("settings"))
         
         api.startOfflineRecording(identifier, feature: feature, settings: settings, secret: nil)
@@ -751,12 +769,10 @@ class PolarSdk : CAPPlugin, ObservableObject {
     @objc func stopOfflineRecording(_ call: CAPPluginCall) {
         guard let identifier = call.getString("identifier"),
               let featureIndex = call.getInt("feature"),
-              featureIndex < PolarDeviceDataType.allCases.count else {
+              let feature = Self.dataType(forJsCode: featureIndex) else {
             call.reject("Missing or invalid parameters")
             return
         }
-        
-        let feature = PolarDeviceDataType.allCases[featureIndex]
         
         api.stopOfflineRecording(identifier, feature: feature)
             .observe(on: MainScheduler.instance)
@@ -781,7 +797,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
             .subscribe(
                 onSuccess: { status in
                     let features = status.compactMap { (key, value) -> Int? in
-                        value ? PolarDeviceDataType.allCases.firstIndex(of: key) : nil
+                        value ? Self.jsCode(for: key) : nil
                     }
                     call.resolve(["features": features])
                 },
@@ -840,7 +856,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let entry = PolarOfflineRecordingEntry(path: path, size: size, date: date, type: .init(rawValue: typeString) ?? .acc)
+        let entry = PolarOfflineRecordingEntry(path: path, size: UInt(size), date: date, type: Self.dataType(forJsName: typeString) ?? .acc)
         
         api.getOfflineRecord(identifier, entry: entry, secret: nil)
             .observe(on: MainScheduler.instance)
@@ -850,45 +866,25 @@ class PolarSdk : CAPPlugin, ObservableObject {
                     switch recordingData {
                     case .accOfflineRecordingData(_, let startTime, let settings):
                         result["startTime"] = dateFormatter.string(from: startTime)
-                        if let settings = settings {
-                            var settingsDict: [String: [Int]] = [:]
-                            for (key, values) in settings.settings {
-                                settingsDict[String(describing: key)] = values.map { Int($0) }
-                            }
-                            result["settings"] = settingsDict
-                        }
+                        result["settings"] = Self.settingsDict(settings)
                     case .gyroOfflineRecordingData(_, let startTime, let settings):
                         result["startTime"] = dateFormatter.string(from: startTime)
-                        if let settings = settings {
-                            var settingsDict: [String: [Int]] = [:]
-                            for (key, values) in settings.settings {
-                                settingsDict[String(describing: key)] = values.map { Int($0) }
-                            }
-                            result["settings"] = settingsDict
-                        }
+                        result["settings"] = Self.settingsDict(settings)
                     case .magOfflineRecordingData(_, let startTime, let settings):
                         result["startTime"] = dateFormatter.string(from: startTime)
-                        if let settings = settings {
-                            var settingsDict: [String: [Int]] = [:]
-                            for (key, values) in settings.settings {
-                                settingsDict[String(describing: key)] = values.map { Int($0) }
-                            }
-                            result["settings"] = settingsDict
-                        }
+                        result["settings"] = Self.settingsDict(settings)
                     case .ppgOfflineRecordingData(_, let startTime, let settings):
                         result["startTime"] = dateFormatter.string(from: startTime)
-                        if let settings = settings {
-                            var settingsDict: [String: [Int]] = [:]
-                            for (key, values) in settings.settings {
-                                settingsDict[String(describing: key)] = values.map { Int($0) }
-                            }
-                            result["settings"] = settingsDict
-                        }
+                        result["settings"] = Self.settingsDict(settings)
                     case .ppiOfflineRecordingData(_, let startTime):
                         result["startTime"] = dateFormatter.string(from: startTime)
                     case .hrOfflineRecordingData(_, let startTime):
                         result["startTime"] = dateFormatter.string(from: startTime)
                     case .temperatureOfflineRecordingData(_, let startTime):
+                        result["startTime"] = dateFormatter.string(from: startTime)
+                    case .skinTemperatureOfflineRecordingData(_, let startTime):
+                        result["startTime"] = dateFormatter.string(from: startTime)
+                    case .emptyData(let startTime):
                         result["startTime"] = dateFormatter.string(from: startTime)
                     }
                     call.resolve(result)
@@ -916,7 +912,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
             return
         }
         
-        let entry = PolarOfflineRecordingEntry(path: path, size: size, date: date, type: .init(rawValue: typeString) ?? .acc)
+        let entry = PolarOfflineRecordingEntry(path: path, size: UInt(size), date: date, type: Self.dataType(forJsName: typeString) ?? .acc)
         
         api.removeOfflineRecord(identifier, entry: entry)
             .observe(on: MainScheduler.instance)
@@ -1208,7 +1204,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
                     let data = distanceData.map { distance -> [String: Any] in
                         [
                             "date": dateFormatter.string(from: distance.date),
-                            "distance": distance.walkingDistance + distance.runningDistance
+                            "distance": Double(distance.distanceMeters)
                         ]
                     }
                     call.resolve(["data": data])
@@ -1317,10 +1313,13 @@ class PolarSdk : CAPPlugin, ObservableObject {
             ).disposed(by: disposeBag)
     }
     
-    private func parseSettings(_ settingsDict: JSObject?) -> PolarSensorSetting? {
+    /// `fallback` is used when JS sent no settings at all; leaving it nil preserves the
+    /// "no settings" meaning that `startOfflineRecording` relies on.
+    private func parseSettings(_ settingsDict: JSObject?,
+                               fallback: [PolarSensorSetting.SettingType: UInt32]? = nil) -> PolarSensorSetting? {
         guard let settingsDict = settingsDict,
               let settings = settingsDict["settings"] as? [String: [Int]] else {
-            return nil
+            return fallback.flatMap { try? PolarSensorSetting($0) }
         }
         
         var polarSettings: [PolarSensorSetting.SettingType: UInt32] = [:]
@@ -1330,7 +1329,7 @@ class PolarSdk : CAPPlugin, ObservableObject {
             }
         }
         
-        return PolarSensorSetting(polarSettings)
+        return try? PolarSensorSetting(polarSettings)
     }
     
     private func parseSettingType(_ key: String) -> PolarSensorSetting.SettingType? {
@@ -1341,6 +1340,37 @@ class PolarSdk : CAPPlugin, ObservableObject {
         case "channels": return .channels
         default: return nil
         }
+    }
+    
+    /// The JS `PolarDataType` numbering declared in definitions.ts and used by the Android
+    /// implementation: HR=0, ECG=1, ACC=2, PPG=3, PPI=4, GYRO=5, MAGNETOMETER=6, TEMPERATURE=7,
+    /// PRESSURE=8. Spelled out deliberately -- `PolarDeviceDataType.allCases` is ordered
+    /// ecg, acc, ppg, ppi, gyro, magnetometer, hr, ... so indexing it mapped every code to the
+    /// wrong stream (notably code 0 stopped ECG instead of HR, leaving HR running after a stop).
+    private static let jsDataTypes: [PolarDeviceDataType] = [
+        .hr, .ecg, .acc, .ppg, .ppi, .gyro, .magnetometer, .temperature, .pressure
+    ]
+    
+    private static func dataType(forJsCode code: Int) -> PolarDeviceDataType? {
+        jsDataTypes.indices.contains(code) ? jsDataTypes[code] : nil
+    }
+    
+    private static func jsCode(for dataType: PolarDeviceDataType) -> Int? {
+        jsDataTypes.firstIndex(of: dataType)
+    }
+    
+    /// `PolarDeviceDataType` has no raw value, so round-trip it through the same
+    /// `String(describing:)` spelling this file already uses when serialising entries to JS.
+    private static func settingsDict(_ settings: PolarSensorSetting) -> [String: [Int]] {
+        var dict: [String: [Int]] = [:]
+        for (key, values) in settings.settings {
+            dict[String(describing: key)] = values.map { Int($0) }
+        }
+        return dict
+    }
+    
+    private static func dataType(forJsName name: String) -> PolarDeviceDataType? {
+        PolarDeviceDataType.allCases.first { String(describing: $0) == name }
     }
 }
 
@@ -1419,8 +1449,17 @@ extension PolarSdk : PolarBleApiDeviceInfoObserver {
         NSLog("battery level updated: \(batteryLevel)")
         var data = JSObject()
         data["identifier"] = identifier
-        data["level"] = batteryLevel
+        data["level"] = Int(batteryLevel)
         notifyListeners("batteryLevelReceived", data: data)
+    }
+    
+    // Required by PolarBleApiDeviceInfoObserver as of PolarBleSdk 6.x. Only
+    // batteryPowerSourcesStateReceived has a default implementation, so this one must be provided.
+    public func batteryChargingStatusReceived(_ identifier: String, chargingStatus: BleBasClient.ChargeState) {
+        var data = JSObject()
+        data["identifier"] = identifier
+        data["chargingStatus"] = String(describing: chargingStatus)
+        notifyListeners("batteryChargingStatusReceived", data: data)
     }
     
     public func disInformationReceived(_ identifier: String, uuid: CBUUID, value: String) {
