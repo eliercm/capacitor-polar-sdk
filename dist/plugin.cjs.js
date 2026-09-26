@@ -724,7 +724,7 @@ class PolarSdkWeb extends core.WebPlugin {
             await this.initialize();
         }
         try {
-            const device = await navigator.bluetooth.requestDevice({
+            let device = await navigator.bluetooth.requestDevice({
                 filters: [
                     { namePrefix: 'Polar 360' }
                 ],
